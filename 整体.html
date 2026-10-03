@@ -5189,46 +5189,61 @@
                 throw new Error('舞台上的导入素材种类太多，导出图超出了浏览器能处理的长度，'
                     + '删掉几种再导出');
             }
-            // WebKit 光栅「SVG 当图片」时，不等里面的 <img> 解码完 —— 内置别针那几张
-            // 50~104KB 的透明 PNG 第一次导出是空的，同一份 data URL 再来一次才齐
-            // （那时它们已经进了缓存）。舞台上那些 <img> 明明早就解码过也没用：主文档
-            // 的解码喂不到 SVG 子文档那条路上去，不然第一次就该是好的。所以只能把
-            // 「第二次」自己做掉 —— 先光栅一遍丢掉，再光栅一遍用。
+            // WebKit 光栅「SVG 当图片」时，不等里面的子资源解码完 —— 内置别针那几张
+            // 50~104KB 的透明 PNG、CSS 里那两张纸纹、切图，冷的时候第一次光栅出来就是缺的。
+            // 舞台上那些 <img> 明明早在主文档里解码过也没用：主文档的解码喂不到
+            // SVG 子文档那条路上去。
             // 触发条件看整份 SVG，不只看 <img> —— 这条漏过一次：两个纸纹
             // （--paper-tex / --bg-tex）和切图也是子文档的子资源，同样会输这场竞速。
             // 只看 <img> 的话，舞台上没贴纸时预热不触发，「第一次导出纹理没有」照旧。
             // 门槛 20KB 只是把字换的那张（几 KB）排除掉，那张从来不输。
             // 这一倍代价只在「缓存是冷的」时候付：第一次导出，或者刚才真的等过
-            // （ensureExportReady 返回 true）。缓存热着还再光栅一遍，纯是白等。
+            // （ensureExportReady 返回 true）。缓存热着还再画一遍，纯是白等。
             // 宁可多付一次也别少付：判据是「刚等过」，不是「第几次」——
             // 中间要是换了网格、加了素材，缓存照样会冷，那时第 N 次也得预热。
             //
-            // ── 预热那条 URL 必须跟正式那条不一样，这一条是这条命根子 ──
-            // 从前两条都是 svgUrl。同一个 URL 加载两次并不等于光栅两次：第二次
-            // 拿回来的是**第一次那张光栅结果的缓存**。实测（_check/_warmkey.mjs，
-            // 把 loadImageEl 包起来记哈希和耗时）：预热 292ms，紧接着的正式加载
-            // 17ms、两次哈希一模一样 —— 正式加载根本没重新光栅，它拿到的正是
-            // 预热烤的那张，而预热那一下恰恰是子资源还全冷的时候，烤出来就是
-            // 坏的那张。于是「预热」不但没用，还保证了坏图被原样交给导出；
-            // 出图跟不预热时逐字节一样，问题当然一点没好。
-            // 给预热另起一个 URL 就拆开了：子资源照样被这一遍烘进缓存（这才是
-            // 导出第二次起一直正常的原因），而正式那遍是一次真正的新光栅，
-            // 拿得到已经热了的子资源。多出来的一句 XML 注释不改任何渲染结果。
+            // ── 预热必须真的「画」一次，这一条是命根子 ──
+            // 从前这里只 loadImageEl 一把就算预热完了。不行：SVG 当图片时，
+            // WebKit 的光栅化是**懒**的 —— 它发生在「画」的那一刻，不在「加载完」
+            // 的那一刻。所以那一遍什么都没光栅化：SVG 文档解析了、onload 也触发了，
+            // 里面的别针、两张纸纹、切图一个都没解码。真正的导出走到下面那次
+            // drawImage，才是这个文档里**第一次真正的光栅化**；它冷着出来就是缺纹理
+            // 的那张，而它一旦做完，子资源才算进了缓存 —— 于是第二次导出永远正常。
+            // 「刷新后第一次必坏、第二次就好」就是这么来的：跟时间无关（干等不会
+            // 触发「画」，等多久都没用），跟域名也无关（file:// 换到 https 照旧）。
+            //
+            // 真机实测（面板「A/B 对撞」，甲乙丙丁戊连着光栅五张）：只有**排第一**的
+            // 甲缺纹理，乙丙丁戊全好；再点一遍，甲也好了。坏的是「本文档第一次真正的
+            // 光栅化」这个名额，不是某一套几何。另外，刷新后先手动光栅一次再导出，
+            // 第一次导出就是好的 —— 名额被消耗掉了。
+            //
+            // 所以预热要做的就是去当那个牺牲品：把图**画进 out 本身**。画进同一张
+            // 画布、同一个尺寸，条件跟正式那次一模一样，也免得多开一块
+            // 1016² / 2032² 的画布（iOS 上那是会出事的）。画完 clearRect 抹干净。
+            //
+            // 预热那条 URL 仍要跟正式那条不一样：同一个 URL 加载两次不等于光栅两次，
+            // 第二次拿回来的是第一次那张光栅结果的缓存（实测：预热 292ms，紧接着的
+            // 正式 17ms、两次哈希一模一样）。撞了缓存键，正式那次拿到的就是牺牲品。
             const heavy = /data:[^"')]{20000,}/.test(svg);
-            if (heavy && (!exportedOnce || waited)) {
-                const warmUrl = 'data:image/svg+xml;charset=utf-8,'
-                    + encodeURIComponent(svg + '<!--warm-->');
-                await loadImageEl(warmUrl).catch(() => { /* 头一遍纯预热，失败就当没有 */ });
-            }
-            const im = await loadImageEl(svgUrl);
-            window.__expDiag = { 固有: im.naturalWidth + 'x' + im.naturalHeight };  // 临时诊断，跟页面底部那块面板一起删
             const out = document.createElement('canvas');
             out.width = OUT_W;
             out.height = OUT_H;
+            const octx = out.getContext('2d');
+            if (heavy && (!exportedOnce || waited)) {
+                const warmUrl = 'data:image/svg+xml;charset=utf-8,'
+                    + encodeURIComponent(svg + '<!--warm-->');
+                try {
+                    const warm = await loadImageEl(warmUrl);
+                    octx.drawImage(warm, 0, 0, out.width, out.height);
+                    octx.clearRect(0, 0, out.width, out.height);
+                } catch (e) { /* 预热失败就当没有，正式那次照走 */ }
+            }
+            const im = await loadImageEl(svgUrl);
+            window.__expDiag = { 固有: im.naturalWidth + 'x' + im.naturalHeight };  // 临时诊断，跟页面底部那块面板一起删
             // 不铺底：画布本来就是透明的，SVG 里也没有背景色。
             // 目标尺寸照写：上面那个 svg 三个数已经一致，固有尺寸理应就是 OUT_W，
             // 这里等于 1:1 原样画；写明只是为了万一还有引擎在固有尺寸上抽风。
-            out.getContext('2d').drawImage(im, 0, 0, out.width, out.height);
+            octx.drawImage(im, 0, 0, out.width, out.height);
             exportedOnce = true;
             return out;
         }
