@@ -5851,6 +5851,7 @@
         <button id="diagRun">跑一遍诊断</button>
         <button id="diagAB">A/B 对撞</button>
         <button id="diagSvg">数元素</button>
+        <button id="diagShadow">阴影定位</button>
         <button id="diagClear">清空</button>
     </div>
 </div>
@@ -6143,6 +6144,124 @@
             } catch (e) { log('数元素炸了：' + e.message); }
             log('');
             log('把上面这几行原样发我。');
+        });
+
+        // ── 阴影定位 ──
+        // 只回答一个问题：手机导出里「每张便签都像被加了一层阴影」，
+        // 是便签自己的 box-shadow 在那台光栅化器里画坏了，还是纸纹那层
+        // mix-blend-mode 没生效 —— .texture-layer 是 opacity .7 的灰颗粒、
+        // z-index 2、压在便签所有内容之上；乘算一丢，它就变成直接盖在便签上的
+        // 一层纱，每张都有。这只可能出在「SVG 当图片」这条路上：屏幕预览正常、
+        // 桌面预览和导出都正常，正好是它的指纹。
+        //
+        // 做法：拿生产真正导出的那份 SVG（上面 loadImageEl 截下来的 lastSvg），
+        // 一份原样、五份各抹掉一条规则，同一台机器、同一条光栅化路径出六张图。
+        // 第 ① 张必然复现你现在看到的样子；哪一张「对了」，凶手就是那一条。
+        async function shadowProbe() {
+            if (!lastSvg) await buildStageImage();
+            if (!lastSvg) return { err: '没截到 SVG —— buildStageImage 没走 loadImageEl？' };
+            const W = stageContainer.clientWidth, H = stageContainer.clientHeight, S = EXPORT_SCALE;
+            const OW = W * S, OH = H * S;
+
+            // 页面 CSS 在导出 SVG 的 <style> 里是转义过的（& → &amp;、< → &lt;）。
+            // 这里补的规则不含这两个字符，追加在第一个 </style> 之前即可 ——
+            // 特异性相同时后写的赢。
+            const 变体 = [
+                ['① 原样（= 手机上导出的样子）', ''],
+                ['② 抹掉便签投影 box-shadow', '.paper-note{box-shadow:none !important}'],
+                ['③ 抹掉纸纹层 .texture-layer', '.texture-layer{display:none !important}'],
+                ['④ 纸纹层改成不混合 normal', '.texture-layer{mix-blend-mode:normal !important}'],
+                ['⑤ 抹掉四角暗部 .corner-shadow', '.corner-shadow{display:none !important}'],
+                ['⑥ 抹掉新加的那张阴影图', '.export-note-shadow-img{display:none !important}'],
+            ];
+
+            const cv = document.createElement('canvas');
+            cv.width = OW; cv.height = OH;
+            const cx = cv.getContext('2d', { willReadFrequently: true });
+            const tz = 300;
+            const tc = document.createElement('canvas');
+            tc.width = tz; tc.height = tz;
+            const tcx = tc.getContext('2d');
+            const 行 = [], 图 = [];
+            let ref = null;
+            const 总 = OH * (OW - 1);
+
+            for (const [名, extra] of 变体) {
+                const svg = extra ? lastSvg.replace('</style>', extra + '</style>') : lastSvg;
+                const im = await new Promise((res) => {
+                    const i = new Image();
+                    i.onerror = () => res(null);
+                    i.onload = () => res(i);
+                    i.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+                });
+                if (!im) { 行.push(名 + '   ✗ 图没加载出来'); continue; }
+                // 连画两次、取第二次：「本文档第一次真正的光栅化」会缺子资源，
+                // 见 buildStageImage 里那段长长的注释。每张变体都是一份新文档，
+                // 都得躲一次，不然六张里会有一堆是「缺纹理」而不是「规则差异」。
+                cx.clearRect(0, 0, OW, OH);
+                cx.drawImage(im, 0, 0, OW, OH);
+                cx.clearRect(0, 0, OW, OH);
+                cx.drawImage(im, 0, 0, OW, OH);
+                const d = cx.getImageData(0, 0, OW, OH).data;
+                let s = 0, g = 0;
+                for (let y = 0; y < OH; y++) {
+                    for (let x = 0; x + 1 < OW; x++) {
+                        const i = (y * OW + x) * 4;
+                        const a = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+                        const b = d[i + 4] * 0.299 + d[i + 5] * 0.587 + d[i + 6] * 0.114;
+                        s += a; g += Math.abs(a - b);
+                    }
+                }
+                let 差异 = '—';
+                if (!ref) ref = d;
+                else {
+                    let n = 0;
+                    for (let i = 0; i < d.length; i += 4) {
+                        if (Math.abs(ref[i] - d[i]) > 8 || Math.abs(ref[i + 1] - d[i + 1]) > 8
+                            || Math.abs(ref[i + 2] - d[i + 2]) > 8) n++;
+                    }
+                    差异 = (n / (OW * OH) * 100).toFixed(2) + '%';
+                }
+                // 缩进 300 的方框里垫白显示。数只说明「不一样」，眼睛才说明「哪个对」
+                const k = Math.min(tz / OW, tz / OH);
+                tcx.fillStyle = '#fff'; tcx.fillRect(0, 0, tz, tz);
+                tcx.drawImage(cv, (tz - OW * k) / 2, (tz - OH * k) / 2, OW * k, OH * k);
+                图.push({ 名, src: tc.toDataURL('image/jpeg', 0.85) });
+                行.push(名 + '   均值 ' + (s / 总).toFixed(2)
+                    + '   锐度 ' + (g / 总).toFixed(3) + '   与①差异 ' + 差异);
+            }
+            return { 舞台: W + 'x' + H, 导出: OW + 'x' + OH, 行, 图 };
+        }
+
+        document.getElementById('diagShadow').addEventListener('click', async () => {
+            lines = [];
+            log('拿「生产真正导出的那份 SVG」出六张图，只换一条规则。');
+            log('第 ① 张就是你现在手机上导出的那个样子；剩下五张各抹掉一条。');
+            log('看哪一张里的「影子」没了 / 变正常了 —— 那条规则就是凶手。');
+            log('');
+            log('正在出图，六张，手机上要几秒…');
+            const prev = document.getElementById('diagPreview');
+            prev.innerHTML = '';
+            try {
+                const r = await shadowProbe();
+                if (r.err) { log(r.err); return; }
+                lines = lines.slice(0, 5);
+                log('舞台 ' + r.舞台 + '   导出 ' + r.导出);
+                r.行.forEach((s) => log('  ' + s));
+                r.图.forEach((t) => {
+                    const f = document.createElement('figure');
+                    const im = document.createElement('img');
+                    im.src = t.src;
+                    const cap = document.createElement('figcaption');
+                    cap.textContent = t.名;
+                    f.append(im, cap);
+                    prev.append(f);
+                });
+            } catch (e) { log('阴影定位炸了：' + e.message); }
+            log('');
+            log('「与①差异」= 抹掉这条规则之后，整张图有多少像素变了。');
+            log('差得越大，说明这条规则在手机上画出来的东西越明显。');
+            log('再把六张小图跟屏幕上那个舞台比 —— 哪一张跟你想要的样子一致。');
         });
 
         document.getElementById('diagAB').addEventListener('click', async () => {
