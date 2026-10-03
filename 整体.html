@@ -5026,24 +5026,30 @@
                 cv.replaceWith(im);
             });
 
-            // ── 旋转便签的阴影：改由我们自己画成一张图 ──
-            // 真机（iPhone / WebKit）导出比桌面生硬、方向还是反的，根因不在便签样式里：
-            // WebKit 把「SVG 当图片」光栅化时，画不对**旋转元素上的 box-shadow** ——
-            // 多层模糊塌成一道带台阶的硬边，缝里那道渐变整个调头。同一份内容当普通网页
-            // 渲染两边一模一样，只有走 SVG + foreignObject 才分家；Chromium 两条路都对。
-            // 隔离到单张便签量过：不转的 9 张差 0.7~0.9（一致），两张带 rotateZ 的差
-            // 16.2 / 17.3；把这两张的 rotateZ 抹成 0，全图平均差 12.1 → 3.1。
-            // 合成页上逐条剥过：perspective / preserve-3d / translateZ / zoom /
-            // will-change / backface-visibility / filter / isolation / 把 4 层拆成 4 个
-            // 各带一层的空盒子 —— 全都不管用。那台光栅化器只对 box-shadow 犯病，
-            // 对图片不犯。
+            // ── 便签的影：改由我们自己画成一张图 ──
+            // 真机（iPhone / WebKit）在「SVG 当图片」这条光栅化路上画不对便签的
+            // box-shadow：模糊半径照放大，偏移量却没跟着放大，本来只该落在下方的那道影
+            // 围着便签绕了一整圈 —— 上面那圈最扎眼，因为那儿本来一片干净。
+            // 桌面 Chromium 两条路都对，屏幕预览也对，所以只在真机导出上现形。
             //
-            // 所以把阴影自己先画进一张离屏画布（canvas 的 shadowBlur 跟 CSS 的 box-shadow
-            // 是同一套高斯，σ 都取 blur/2），当成一张图垫在便签底下。图在便签自己的
-            // 坐标系里，便签转它就跟着转，位置跟原来那几层 box-shadow 一个不差。
-            // 只动导出用的克隆体，屏幕上的画布一个像素都不碰。
+            // 2026-10-04 真机八变体实测（面板「阴影定位」；量的是第一排便签正上方那条带
+            // 的亮度，近带 = 贴着便签，远带 = 再往上 50px。舞台 508²、导出 1016²、
+            // 便签 9 张）：
+            //   ① 全用 box-shadow           近127.4 / 远159.3  差 31.9  ⚠
+            //   ② 转过Z的改走图片、其余照旧  近140.2 / 远159.3  差 19.1  ⚠
+            //   ③ 抹掉 box-shadow           近155.7 / 远159.3  差  3.6  平 ← 只有它
+            //   ④抹纸纹层 ⑤纸纹改normal ⑥抹角暗部 ⑧抹背景纹理：近带纹丝不动
+            //     （140.0~145.3），全不是它们
+            // 只有 ③ 把上面那道影抹掉了，凶手就是 box-shadow。于是把它整个从导出克隆体里
+            // 摘掉，影按 CSS 的语义自己重画：box-shadow 画在元素自身坐标系里，
+            // 便签转它就跟着转，位置跟原来那几层一个不差。
+            // 桌面实测：自己画的影跟 CSS 的 box-shadow 差 0.04 灰度、565 个像素。
+            //
+            // 影图比最终尺寸多画一倍像素（画布按 S*影倍，CSS 尺寸照旧），让 GPU 缩小采样。
+            // 图是落在被 3D 变换过的便签里的，等尺寸贴上去会被那层采样糊掉，
+            // 便签下沿就变得不清晰不明确；多这一倍像素是给采样留的余量。
             const 阴影层 = (css) => {
-                // inset 这边不重现，宁可整个不动
+                // inset 这边不重现，宁可整个不动（本文件没有 inset 便签影）
                 if (!css || /\binset\b/i.test(css)) return null;
                 // 颜色和「偏移/模糊/扩散」两组分开抓再按序配对 —— box-shadow 简写里
                 // 颜色写在前面还是后面都合法，本文件两种写法都有
@@ -5055,25 +5061,25 @@
                     return { color: cs[i], x: v[0], y: v[1], blur: v[2], spread: v[3] || 0 };
                 });
             };
+            const 影倍 = 2;      // 影图比最终尺寸多一倍像素，给 GPU 的缩小采样留余量
             const liveNotes = [...stageContainer.querySelectorAll('.paper-note')];
             [...clone.querySelectorAll('.paper-note')].forEach((el, i) => {
                 const live = liveNotes[i];
                 if (!live || el.classList.contains('deleted')) return;
-                // 只有真的转了 Z 的才动手：其余便签（含 rotateX/rotateY、纯 translateZ）
-                // 两边本来就一致，别去碰
-                const m = /rotateZ\(\s*(-?[\d.]+)deg/.exec(
-                    live.style.getPropertyValue('--note-transform') || '');
-                if (!m || Math.abs(parseFloat(m[1])) < 0.01) return;
                 const layers = 阴影层(live.style.getPropertyValue('--note-shadow')
                     || '0 2px 6px rgba(0,0,0,0.2)');
                 const w = live.clientWidth;
                 const h = live.clientHeight;
+                // 解不出层数、或者量不到尺寸：什么都不改，CSS 那份至少还在，
+                // 宁可这张便签照旧难看，也别把它的影整个搞没
                 if (!layers || !w || !h) return;
-                const S = EXPORT_SCALE;
+                const S = EXPORT_SCALE * 影倍;
+                // 影能伸出元素框多远：偏移 + 扩散，再加一倍模糊半径还多。
+                // 宁可留宽一点 —— 裁掉一条边比多占几 KB 难看得多
                 let pad = 0;
                 layers.forEach((L) => {
-                    pad = Math.max(pad, Math.abs(L.x) + Math.abs(L.y)
-                        + Math.abs(L.spread) + L.blur * 1.5);
+                    pad = Math.max(pad, Math.max(Math.abs(L.x), Math.abs(L.y))
+                        + Math.abs(L.spread) + L.blur * 1.2);
                 });
                 pad = Math.ceil(pad) + 2;
                 const cv = document.createElement('canvas');
@@ -5098,7 +5104,7 @@
                     + ` width: ${w + pad * 2}px; height: ${h + pad * 2}px;`);
                 im.src = cv.toDataURL('image/png');
                 // 垫在最底下：便签本体（.sticky-img-inner 是不透明的）正好盖住中间那块，
-                // 露在外面的就是影，DOM 顺序在这儿就是绘制顺序
+                // 露在外面的就是影。DOM 顺序在这儿就是绘制顺序。
                 el.insertBefore(im, el.firstChild);
                 el.style.boxShadow = 'none';
             });
