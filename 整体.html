@@ -6147,46 +6147,83 @@
         });
 
         // ── 阴影定位 ──
-        // 只回答一个问题：手机导出里「每张便签都像被加了一层阴影」，
-        // 是便签自己的 box-shadow 在那台光栅化器里画坏了，还是纸纹那层
-        // mix-blend-mode 没生效 —— .texture-layer 是 opacity .7 的灰颗粒、
-        // z-index 2、压在便签所有内容之上；乘算一丢，它就变成直接盖在便签上的
-        // 一层纱，每张都有。这只可能出在「SVG 当图片」这条路上：屏幕预览正常、
-        // 桌面预览和导出都正常，正好是它的指纹。
+        // 回答一个问题：手机导出里「每张便签上方都有一道很生硬的影」，屏幕上却没有。
+        // 只在「SVG 当图片」这条光栅化路径上才会分家的东西，全文只有四处：
+        //   便签自己的 box-shadow、便签纸纹层 .texture-layer（压在便签所有内容之上、
+        //   靠 multiply 混色，乘算一丢就变成直接盖上去的一层）、四角暗部 .corner-shadow、
+        //   舞台背景纹理层 .stage-tex。
         //
-        // 做法：拿生产真正导出的那份 SVG（上面 loadImageEl 截下来的 lastSvg），
-        // 一份原样、五份各抹掉一条规则，同一台机器、同一条光栅化路径出六张图。
-        // 第 ① 张必然复现你现在看到的样子；哪一张「对了」，凶手就是那一条。
+        // 做法：拿生产真正导出的那份 SVG（上面截下来的 lastSvg）出八张图 ——
+        // 一张上一版写法、一张原样、六张各抹掉一条规则。
+        //
+        // 上一轮给的是整幅缩略图，300px 里那 4px 的缝根本看不见，六张全都「不对」
+        // 多半是这么来的。这一轮每张给的是左上角 420×420 的**原尺寸裁切**：
+        // 第一排便签的上边缘、以及它上面那圈舞台底都在画面里，
+        // 「上方那道影」在不在，不用眯眼睛。另配一条数：便签正上方那条带的亮度
+        // 跟再往上 50px 那条带比 —— 上面真有一道影，近带就会明显更暗。
         async function shadowProbe() {
             if (!lastSvg) await buildStageImage();
             if (!lastSvg) return { err: '没截到 SVG —— buildStageImage 没走 loadImageEl？' };
             const W = stageContainer.clientWidth, H = stageContainer.clientHeight, S = EXPORT_SCALE;
             const OW = W * S, OH = H * S;
 
-            // 页面 CSS 在导出 SVG 的 <style> 里是转义过的（& → &amp;、< → &lt;）。
-            // 这里补的规则不含这两个字符，追加在第一个 </style> 之前即可 ——
-            // 特异性相同时后写的赢。
+            // 便签在导出图里的位置。舞台是 transform: scale(--stage-scale) 缩着显示的，
+            // getBoundingClientRect 拿到的也是缩过的，得按 clientWidth 反算回来 ——
+            // 导出那边取的是 clientWidth（布局度量），不认那个 transform。
+            const stR = stageContainer.getBoundingClientRect();
+            const k = stR.width ? stageContainer.clientWidth / stR.width : 1;
+            const 框 = [...stageContainer.querySelectorAll('.paper-note')].map((el) => {
+                const r = el.getBoundingClientRect();
+                return { x: (r.left - stR.left) * k * S, y: (r.top - stR.top) * k * S,
+                         w: r.width * k * S, h: r.height * k * S };
+            }).filter((r) => r.w > 1 && r.h > 1);
+            const 便签数 = 框.length;
+            const 顶 = 便签数 ? Math.min(...框.map((r) => r.y)) : 0;
+            const 左 = 便签数 ? Math.min(...框.map((r) => r.x)) : 0;
+            const 右 = 便签数 ? Math.max(...框.map((r) => r.x + r.w)) : 0;
+
+            // 上一版：旋转便签的影还是 box-shadow 画的。现在这版把它的 box-shadow 写成了
+            // 行内 none，所以要用 !important 盖回去（行内的普通声明压不过样式表里的 !important），
+            // 再把新加的那张影图藏掉。
+            const 旧法 = '.paper-note{box-shadow:var(--note-shadow,0 2px 6px rgba(0,0,0,.2)) !important}'
+                + '.export-note-shadow-img{display:none !important}';
+
             const 变体 = [
-                ['① 原样（= 手机上导出的样子）', ''],
-                ['② 抹掉便签投影 box-shadow', '.paper-note{box-shadow:none !important}'],
-                ['③ 抹掉纸纹层 .texture-layer', '.texture-layer{display:none !important}'],
-                ['④ 纸纹层改成不混合 normal', '.texture-layer{mix-blend-mode:normal !important}'],
-                ['⑤ 抹掉四角暗部 .corner-shadow', '.corner-shadow{display:none !important}'],
-                ['⑥ 抹掉新加的那张阴影图', '.export-note-shadow-img{display:none !important}'],
+                ['① 上一版（box-shadow 照旧）', 旧法],
+                ['② 现在这版（原样）', ''],
+                ['③ 抹掉便签投影 box-shadow', '.paper-note{box-shadow:none !important}'],
+                ['④ 抹掉便签纸纹层 .texture-layer', '.texture-layer{display:none !important}'],
+                ['⑤ 纸纹层改不混合 normal', '.texture-layer{mix-blend-mode:normal !important}'],
+                ['⑥ 抹掉四角暗部 .corner-shadow', '.corner-shadow{display:none !important}'],
+                ['⑦ 抹掉新加的影图', '.export-note-shadow-img{display:none !important}'],
+                ['⑧ 抹掉背景纹理层 .stage-tex', '.stage-tex{display:none !important}'],
             ];
 
+            const 裁 = { x: Math.max(0, Math.round(左 - 110)), y: Math.max(0, Math.round(顶 - 110)), w: 420, h: 420 };
             const cv = document.createElement('canvas');
             cv.width = OW; cv.height = OH;
             const cx = cv.getContext('2d', { willReadFrequently: true });
-            const tz = 300;
-            const tc = document.createElement('canvas');
-            tc.width = tz; tc.height = tz;
-            const tcx = tc.getContext('2d');
-            const 行 = [], 图 = [];
-            let ref = null;
+            const 小 = document.createElement('canvas');
+            const 图 = [], 行 = [];
+            let 基准 = null;
             const 总 = OH * (OW - 1);
+            const lum = (d, i) => d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+            // 便签正上方那两条带。近带贴着实拍边缘，远带再往上 50px；
+            // 上面真有一道影，近带就会比远带暗。
+            const 带 = (d, y0, y1) => {
+                let s = 0, n = 0;
+                for (let y = Math.max(0, Math.round(y0)); y < Math.min(OH, Math.round(y1)); y++) {
+                    for (let x = Math.max(0, Math.round(左 + 20)); x < Math.min(OW, Math.round(右 - 20)); x++) {
+                        const i = (y * OW + x) * 4;
+                        if (d[i + 3] < 8) continue;
+                        s += lum(d, i); n++;
+                    }
+                }
+                return n ? s / n : NaN;
+            };
 
-            for (const [名, extra] of 变体) {
+            for (let v = 0; v < 变体.length; v++) {
+                const [名, extra] = 变体[v];
                 const svg = extra ? lastSvg.replace('</style>', extra + '</style>') : lastSvg;
                 const im = await new Promise((res) => {
                     const i = new Image();
@@ -6196,57 +6233,66 @@
                 });
                 if (!im) { 行.push(名 + '   ✗ 图没加载出来'); continue; }
                 // 连画两次、取第二次：「本文档第一次真正的光栅化」会缺子资源，
-                // 见 buildStageImage 里那段长长的注释。每张变体都是一份新文档，
-                // 都得躲一次，不然六张里会有一堆是「缺纹理」而不是「规则差异」。
+                // 见 buildStageImage 里那段长注释。每张变体都是一份新文档，都得躲一次。
                 cx.clearRect(0, 0, OW, OH);
                 cx.drawImage(im, 0, 0, OW, OH);
                 cx.clearRect(0, 0, OW, OH);
                 cx.drawImage(im, 0, 0, OW, OH);
                 const d = cx.getImageData(0, 0, OW, OH).data;
-                let s = 0, g = 0;
+                let s = 0;
                 for (let y = 0; y < OH; y++) {
-                    for (let x = 0; x + 1 < OW; x++) {
-                        const i = (y * OW + x) * 4;
-                        const a = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-                        const b = d[i + 4] * 0.299 + d[i + 5] * 0.587 + d[i + 6] * 0.114;
-                        s += a; g += Math.abs(a - b);
-                    }
+                    for (let x = 0; x + 1 < OW; x++) s += lum(d, (y * OW + x) * 4);
                 }
                 let 差异 = '—';
-                if (!ref) ref = d;
-                else {
+                if (v === 1) 基准 = d;                     // ② 原样 是差异基准
+                else if (基准) {
                     let n = 0;
                     for (let i = 0; i < d.length; i += 4) {
-                        if (Math.abs(ref[i] - d[i]) > 8 || Math.abs(ref[i + 1] - d[i + 1]) > 8
-                            || Math.abs(ref[i + 2] - d[i + 2]) > 8) n++;
+                        if (Math.abs(基准[i] - d[i]) > 8 || Math.abs(基准[i + 1] - d[i + 1]) > 8
+                            || Math.abs(基准[i + 2] - d[i + 2]) > 8) n++;
                     }
                     差异 = (n / (OW * OH) * 100).toFixed(2) + '%';
-                }
-                // 缩进 300 的方框里垫白显示。数只说明「不一样」，眼睛才说明「哪个对」
-                const k = Math.min(tz / OW, tz / OH);
-                tcx.fillStyle = '#fff'; tcx.fillRect(0, 0, tz, tz);
-                tcx.drawImage(cv, (tz - OW * k) / 2, (tz - OH * k) / 2, OW * k, OH * k);
-                图.push({ 名, src: tc.toDataURL('image/jpeg', 0.85) });
-                行.push(名 + '   均值 ' + (s / 总).toFixed(2)
-                    + '   锐度 ' + (g / 总).toFixed(3) + '   与①差异 ' + 差异);
+                } else 差异 = '基准';
+
+                // 原尺寸裁切，不是缩略图
+                小.width = 裁.w; 小.height = 裁.h;
+                const 小c = 小.getContext('2d');
+                小c.fillStyle = '#fff'; 小c.fillRect(0, 0, 裁.w, 裁.h);
+                小c.drawImage(cv, 裁.x, 裁.y, 裁.w, 裁.h, 0, 0, 裁.w, 裁.h);
+                图.push({ 名, src: 小.toDataURL('image/jpeg', 0.92) });
+
+                const 近 = 便签数 ? 带(d, 顶 - 14, 顶 - 4) : NaN;
+                const 远 = 便签数 ? 带(d, 顶 - 70, 顶 - 50) : NaN;
+                行.push(名.padEnd(22, ' ')
+                    + '  全图 ' + (s / 总).toFixed(2)
+                    + '  便签上方 近' + (isNaN(近) ? '—' : 近.toFixed(1))
+                    + '/远' + (isNaN(远) ? '—' : 远.toFixed(1))
+                    + (isNaN(近) || isNaN(远) ? '' : (近 < 远 - 4 ? ' ⚠有影' : ' 平'))
+                    + '  与②差异 ' + 差异);
             }
-            return { 舞台: W + 'x' + H, 导出: OW + 'x' + OH, 行, 图 };
+            return { 舞台: W + 'x' + H, 导出: OW + 'x' + OH,
+                     裁切: `左上角 ${裁.w}×${裁.h} 原尺寸（便签 ${便签数} 张，第一排顶边 y=${Math.round(顶)}）`,
+                     行, 图 };
         }
 
         document.getElementById('diagShadow').addEventListener('click', async () => {
             lines = [];
-            log('拿「生产真正导出的那份 SVG」出六张图，只换一条规则。');
-            log('第 ① 张就是你现在手机上导出的那个样子；剩下五张各抹掉一条。');
-            log('看哪一张里的「影子」没了 / 变正常了 —— 那条规则就是凶手。');
+            log('拿生产真正导出的那份 SVG 出八张图。每张是左上角的原尺寸裁切，不是缩略图。');
+            log('① = 上一版写法（box-shadow 照旧）；② = 现在这版原样；③~⑧ 各抹掉一条规则。');
+            log('看哪一张里「便签上方那道影」没了 —— 那条规则就是凶手。');
             log('');
-            log('正在出图，六张，手机上要几秒…');
+            log('「便签上方 近/远」= 便签正上方那条带的亮度 / 再往上 50px 那条带。');
+            log('近 明显比 远 暗 ⇒ 上面真有一道影（会标 ⚠有影）。两边都平才是对的。');
+            log('');
+            log('正在出图，八张，手机上要十几秒…');
             const prev = document.getElementById('diagPreview');
             prev.innerHTML = '';
             try {
                 const r = await shadowProbe();
                 if (r.err) { log(r.err); return; }
-                lines = lines.slice(0, 5);
+                lines = lines.slice(0, 7);
                 log('舞台 ' + r.舞台 + '   导出 ' + r.导出);
+                log(r.裁切);
                 r.行.forEach((s) => log('  ' + s));
                 r.图.forEach((t) => {
                     const f = document.createElement('figure');
@@ -6258,10 +6304,6 @@
                     prev.append(f);
                 });
             } catch (e) { log('阴影定位炸了：' + e.message); }
-            log('');
-            log('「与①差异」= 抹掉这条规则之后，整张图有多少像素变了。');
-            log('差得越大，说明这条规则在手机上画出来的东西越明显。');
-            log('再把六张小图跟屏幕上那个舞台比 —— 哪一张跟你想要的样子一致。');
         });
 
         document.getElementById('diagAB').addEventListener('click', async () => {
