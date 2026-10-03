@@ -5026,28 +5026,39 @@
                 cv.replaceWith(im);
             });
 
-            // ── 便签的影：改由我们自己画成一张图 ──
-            // 真机（iPhone / WebKit）在「SVG 当图片」这条光栅化路上画不对便签的
-            // box-shadow：模糊半径照放大，偏移量却没跟着放大，本来只该落在下方的那道影
-            // 围着便签绕了一整圈 —— 上面那圈最扎眼，因为那儿本来一片干净。
-            // 桌面 Chromium 两条路都对，屏幕预览也对，所以只在真机导出上现形。
+            // ── 便签整层：连影带纸，自己画成图 ──
+            // 【为什么】真机（iPhone / WebKit）把这份 DOM 序列化成 SVG、再当图片光栅化时，
+            // 走的是一条跟屏幕预览不同的、近似实现的旧路。便签身上凡是「跟坐标空间有关」
+            // 的 CSS，在那条路上都靠不住。这个项目已经撞过三处，全是同一类：
+            //   · box-shadow —— 模糊半径跟着 zoom:2 放大，偏移量却不跟，本该只落在下方的
+            //     那道影绕着便签围了一圈，上面那圈最扎眼（那儿本来一片干净）。
+            //     2026-10-04 真机八变体实测（面板「阴影定位」）：只有「抹掉 box-shadow」
+            //     那一张把便签上方那道影去掉了（近带 155.7 / 远带 159.3，差 3.6；
+            //     其余七张差 19~32，全没动）。
+            //   · background-size / background-position —— 拼图便签靠这两个数从整张切图
+            //     里取自己那一格，错一点就是整整一格的错位。
+            //   · mix-blend-mode: multiply（纸纹层）配 radial-gradient（四角暗部）。
+            // 与其一条一条去猜 WebKit 认哪条不认哪条，不如把便签整个从那条路上摘下来：
+            // 三层都在这儿用 canvas 画成图，克隆体里只留 <img>。
+            // 「把一张 PNG 摆到指定位置」是那条路上最不可能出错的操作。
             //
-            // 2026-10-04 真机八变体实测（面板「阴影定位」；量的是第一排便签正上方那条带
-            // 的亮度，近带 = 贴着便签，远带 = 再往上 50px。舞台 508²、导出 1016²、
-            // 便签 9 张）：
-            //   ① 全用 box-shadow           近127.4 / 远159.3  差 31.9  ⚠
-            //   ② 转过Z的改走图片、其余照旧  近140.2 / 远159.3  差 19.1  ⚠
-            //   ③ 抹掉 box-shadow           近155.7 / 远159.3  差  3.6  平 ← 只有它
-            //   ④抹纸纹层 ⑤纸纹改normal ⑥抹角暗部 ⑧抹背景纹理：近带纹丝不动
-            //     （140.0~145.3），全不是它们
-            // 只有 ③ 把上面那道影抹掉了，凶手就是 box-shadow。于是把它整个从导出克隆体里
-            // 摘掉，影按 CSS 的语义自己重画：box-shadow 画在元素自身坐标系里，
-            // 便签转它就跟着转，位置跟原来那几层一个不差。
-            // 桌面实测：自己画的影跟 CSS 的 box-shadow 差 0.04 灰度、565 个像素。
+            // 【怎么画的】按 .sticky-img-inner / .corner-shadow / .texture-layer 三层的
+            // 语义逐条复刻。底色/底图/纸纹从**活元素的行内样式**上读 —— 便签长什么样是
+            // JS 写在行内样式里的（paint2DNote），读它就不会跟屏幕上那份跑偏；
+            // 四角暗部直接读 p2，省得去解析自己刚写出去的 CSS 字符串。
             //
-            // 影图比最终尺寸多画一倍像素（画布按 S*影倍，CSS 尺寸照旧），让 GPU 缩小采样。
-            // 图是落在被 3D 变换过的便签里的，等尺寸贴上去会被那层采样糊掉，
-            // 便签下沿就变得不清晰不明确；多这一倍像素是给采样留的余量。
+            // 【字为什么不一起画】字那张图（见下面的「字换图」）是按 1× 导出分辨率画的，
+            // 画进这张放大了 影倍 倍的画布等于把它放大，反而糊；而且它本来就不碰上面
+            // 那三个属性 —— 它自己就是一张 PNG。所以字照旧单独一张，叠在最上面。
+            //
+            // 【为什么出两张图】影那张必须带透明（便签框外是透明的），纸身那张是不透明的
+            // —— 分开出，纸身就能走 JPEG，同样的画面小一个量级。SVG 有 7.5MB 的天花板
+            // （SVG_URL_MAX），36 张便签全走 PNG 会顶穿。纸身要是本来半透明（面板上调过
+            // 透明度），分开画反而更对：它就该半透明地叠在自己的影上。
+            //
+            // 【影图为什么比最终尺寸多一倍像素】画布按 S = EXPORT_SCALE * 影倍，CSS 尺寸
+            // 照旧。图是落在被 3D 变换过的便签里的，等尺寸贴上去会被那层采样糊掉，便签
+            // 下沿就变得不清晰不明确；多这一倍是给 GPU 缩小采样留的余量。
             const 阴影层 = (css) => {
                 // inset 这边不重现，宁可整个不动（本文件没有 inset 便签影）
                 if (!css || /\binset\b/i.test(css)) return null;
@@ -5061,69 +5072,194 @@
                     return { color: cs[i], x: v[0], y: v[1], blur: v[2], spread: v[3] || 0 };
                 });
             };
-            const 影倍 = 2;      // 影图比最终尺寸多一倍像素，给 GPU 的缩小采样留余量
+            // 便签纸纹：屏幕上 .texture-layer 用的那一份（--paper-tex），配方逐条照抄
+            //   mix-blend-mode: multiply  -> globalCompositeOperation = 'multiply'
+            //   filter: grayscale(100%)    -> 自己按 luma 算一遍
+            //   opacity: 0.7               -> globalAlpha
+            //   background-size: 100% 100% -> 每张便签上拉满
+            // 灰度为什么不用 ctx.filter：那又是引擎差异。3D 那条路
+            // （buildFusedTextureCanvas）用的是它、注释写着「贴图本身已纯灰，空转」。
+            // 这边不赌它灰不灰，512² 算一遍也就几毫秒，所有便签共用这一份。
+            // 两张图都比最终尺寸多一倍像素（S影 / S身 = EXPORT_SCALE * 2），CSS 尺寸照旧。
+            // 便签身上压着 3D 变换（rotateZ/rotateX/rotateY/translateZ），合成器会把它
+            // 当成一块纹理重新采样一遍；正正好好的 1:1 源在这一步是放大，看着就糊。
+            // 实测（Edge 6×6，全图横向梯度能量）：身倍 1 → 掉 27%，身倍 2 → 掉 9.5%，
+            // 身倍 3 → 不更好而 SVG 涨到 6.9MB。所以 2 是这一步的顶。
+            // 再往里看一层：这 9.5% 几乎全在便签边界那一像素上（见下面挖空那段），
+            // 纸纹颗粒本身是逐像素对得上的（改前 242/246/242/246，改后 242/247/240/247）。
+            const 影倍 = 2;
+            const 身倍 = 2;
+            const S影 = EXPORT_SCALE * 影倍;
+            const S身 = EXPORT_SCALE * 身倍;
+            const 纸身质量 = 0.92;      // 纸身走 JPEG：它不透明，照片和纸纹最吃这个格式
+            const 纸纹 = await (async () => {
+                let im = (paperTexImg && paperTexImg.complete && paperTexImg.naturalWidth)
+                    ? paperTexImg : null;
+                if (!im) {
+                    const sv = document.documentElement.style.getPropertyValue('--paper-tex').trim();
+                    const m = /^url\((["']?)([\s\S]*)\1\)$/.exec(sv);
+                    try { im = await loadImageEl(m ? m[2] : sv); } catch (e) { return null; }
+                }
+                try {
+                    const c = document.createElement('canvas');
+                    c.width = im.naturalWidth; c.height = im.naturalHeight;
+                    const x = c.getContext('2d', { willReadFrequently: true });
+                    x.drawImage(im, 0, 0);
+                    const d = x.getImageData(0, 0, c.width, c.height);
+                    const p = d.data;
+                    for (let i = 0; i < p.length; i += 4) {
+                        const l = (p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0;
+                        p[i] = p[i + 1] = p[i + 2] = l;
+                    }
+                    x.putImageData(d, 0, 0);
+                    return c;
+                } catch (e) { return null; }    // 拿不到纸纹就不铺，别的照旧
+            })();
+            // 切片底图所有拼图便签共用同一张；自定义图按 src 各缓存一份
+            const 图缓存 = new Map();
+            const 取图 = async (src) => {
+                if (!src) return null;
+                if (!图缓存.has(src)) 图缓存.set(src, await loadImageEl(src).catch(() => null));
+                return 图缓存.get(src);
+            };
+            const 便签表 = new Map(gridNotes.map((n) => [n.el, n]));
             const liveNotes = [...stageContainer.querySelectorAll('.paper-note')];
-            [...clone.querySelectorAll('.paper-note')].forEach((el, i) => {
-                const live = liveNotes[i];
-                if (!live || el.classList.contains('deleted')) return;
-                const layers = 阴影层(live.style.getPropertyValue('--note-shadow')
-                    || '0 2px 6px rgba(0,0,0,0.2)');
+            const cloneNotes = [...clone.querySelectorAll('.paper-note')];
+            for (let i = 0; i < cloneNotes.length; i++) {
+                const el = cloneNotes[i];
+                const live = liveNotes[i];      // cloneNode 保序，两边下标一一对应
+                // 那三层在克隆体里一律撤掉 —— 活都搬到图上做了，留着就是「图上画一份、
+                // CSS 再画一份」地叠着。只找便签子树里的：舞台背景照片上那张纸纹
+                // （#bgContainer 里的 .texture-layer）不归这儿管，动了就是另一处回归。
+                el.querySelectorAll('.sticky-img-inner, .corner-shadow, .texture-layer')
+                    .forEach((n) => n.remove());
+                // 影在图上、纸身也在图上，CSS 那份 box-shadow 必须关掉 —— 它就是真机上
+                // 绕着便签围一圈的那一道。行内的 none 压得过样式表里 .paper-note 那条。
+                el.style.boxShadow = 'none';
+                // 删掉的便签导出时本来就看不见（EXPORT_CSS 里 visibility: hidden），
+                // 不必为它画图；但上面那三层还是得撤 —— 它们的底图是内联的 data URI，
+                // 留着就是把一整张切图背进 SVG 里（原先靠 --slice-img 去重挡着）。
+                if (!live || el.classList.contains('deleted')) continue;
                 const w = live.clientWidth;
                 const h = live.clientHeight;
-                // 解不出层数、或者量不到尺寸：什么都不改，CSS 那份至少还在，
-                // 宁可这张便签照旧难看，也别把它的影整个搞没
-                if (!layers || !w || !h) return;
-                const S = EXPORT_SCALE * 影倍;
-                // 影能伸出元素框多远：偏移 + 扩散，再加一倍模糊半径还多。
-                // 宁可留宽一点 —— 裁掉一条边比多占几 KB 难看得多
+                if (!w || !h) continue;
+
+                // ① 影。参数从行内 --note-shadow 上读，兜底用 CSS 里那条默认值
+                const 影列表 = 阴影层(live.style.getPropertyValue('--note-shadow')
+                    || '0 2px 6px rgba(0,0,0,0.2)');
                 let pad = 0;
-                layers.forEach((L) => {
+                if (影列表) 影列表.forEach((L) => {
                     pad = Math.max(pad, Math.max(Math.abs(L.x), Math.abs(L.y))
                         + Math.abs(L.spread) + L.blur * 1.2);
                 });
-                pad = Math.ceil(pad) + 2;
-                const cv = document.createElement('canvas');
-                cv.width = Math.round((w + pad * 2) * S);
-                cv.height = Math.round((h + pad * 2) * S);
-                const cx = cv.getContext('2d');
-                // 全程按设备像素算，不借 ctx.scale —— shadowBlur / shadowOffset 吃不吃
-                // 当前变换矩阵各家说法不一，绕开这个歧义
-                layers.forEach((L) => {
-                    cx.shadowColor = L.color;
-                    cx.shadowBlur = L.blur * S;
-                    cx.shadowOffsetX = L.x * S;
-                    cx.shadowOffsetY = L.y * S;
+                pad = Math.ceil(pad) + 2;   // 宁可留宽一点：裁掉一条边比多占几 KB 难看得多
+                let 影im = null;
+                if (影列表) {
+                    const cv = document.createElement('canvas');
+                    cv.width = Math.round((w + pad * 2) * S影);
+                    cv.height = Math.round((h + pad * 2) * S影);
+                    const cx = cv.getContext('2d');
+                    // 全程按设备像素算，不借 ctx.scale —— shadowBlur / shadowOffset 吃不吃
+                    // 当前变换矩阵各家说法不一，绕开这个歧义
+                    影列表.forEach((L) => {
+                        cx.shadowColor = L.color;
+                        cx.shadowBlur = L.blur * S影;
+                        cx.shadowOffsetX = L.x * S影;
+                        cx.shadowOffsetY = L.y * S影;
+                        cx.fillStyle = '#000';
+                        cx.fillRect((pad - L.spread) * S影, (pad - L.spread) * S影,
+                            (w + L.spread * 2) * S影, (h + L.spread * 2) * S影);
+                    });
+                    // canvas 的影是连着形状本身一起画的，上面那几块实心黑得挖掉。
+                    // 两个理由：
+                    // ① 便签一旦不是全不透明（面板上有透明度滑块），那块黑会从纸身底下
+                    //    透出来把便签染脏；
+                    // ② 便签是转过角度的，四条边都带抗锯齿，边界那一像素纸身只盖住一半，
+                    //    没挖干净的黑就从那儿透出来，给每张便签描一圈黑边。实测跨下沿的
+                    //    剖面（便签外侧第一像素的亮度）：不挖空 122、旧版 135、挖空 145
+                    //    —— 旧版那条黑边是它一半的浓度。屏幕上没有黑底，所以 145 才是
+                    //    跟画布一致的那个。
+                    // 挖掉的正好是纸身盖住的那块，露在外面的影一点不少。
+                    cx.globalCompositeOperation = 'destination-out';
                     cx.fillStyle = '#000';
-                    cx.fillRect((pad - L.spread) * S, (pad - L.spread) * S,
-                        (w + L.spread * 2) * S, (h + L.spread * 2) * S);
-                });
-                const im = document.createElement('img');
-                im.className = 'export-note-shadow-img';
-                im.setAttribute('style', 'position: absolute; pointer-events: none;'
-                    + ` left: ${-pad}px; top: ${-pad}px;`
-                    + ` width: ${w + pad * 2}px; height: ${h + pad * 2}px;`);
-                im.src = cv.toDataURL('image/png');
-                // 垫在最底下：便签本体（.sticky-img-inner 是不透明的）正好盖住中间那块，
-                // 露在外面的就是影。DOM 顺序在这儿就是绘制顺序。
-                el.insertBefore(im, el.firstChild);
-                el.style.boxShadow = 'none';
-            });
+                    cx.fillRect(pad * S影, pad * S影, w * S影, h * S影);
+                    cx.globalCompositeOperation = 'source-over';
 
-            // 底图去重：每张拼图便签的行内 background-image 里都抄了一整份切图，6×6 光这一项
-            // 就能让克隆体涨到 40MB，光栅化要十秒。提成一个变量挂在克隆体上，各便签只留一句
-            // var()。纯色 / 自带图片的便签背景不是这张图，原样不动。
-            const sliceRaw = currentSlicedImage ? currentSlicedImage.src : '';
-            const sliceCss = `url("${sliceRaw}")`;
-            if (sliceRaw) {
-                clone.style.setProperty('--slice-img', sliceCss);
-                const liveInners = [...stageContainer.querySelectorAll('.sticky-img-inner')];
-                const cloneInners = [...clone.querySelectorAll('.sticky-img-inner')];
-                liveInners.forEach((live, i) => {
-                    const bg = live.style.backgroundImage;
-                    // 读回来浏览器会给 data URL 补上引号，两种写法都认
-                    if (bg !== sliceCss && bg !== `url(${sliceRaw})`) return;
-                    cloneInners[i].style.backgroundImage = 'var(--slice-img)';
-                });
+                    影im = document.createElement('img');
+                    影im.className = 'export-note-shadow-img';
+                    影im.setAttribute('style', 'position: absolute; pointer-events: none;'
+                        + ` left: ${-pad}px; top: ${-pad}px;`
+                        + ` width: ${w + pad * 2}px; height: ${h + pad * 2}px;`);
+                    影im.src = cv.toDataURL('image/png');
+                    el.insertBefore(影im, el.firstChild);       // 垫在最底下
+                }
+
+                // ② 纸身：底 → 四角暗部 → 纸纹，顺序就是那三层 CSS 的 z-index 顺序
+                //    （.sticky-img-inner 在下、.corner-shadow z-index:1、.texture-layer z-index:2）
+                const body = document.createElement('canvas');
+                body.width = Math.round(w * S身);
+                body.height = Math.round(h * S身);
+                const bx = body.getContext('2d');
+                const 内层 = live.querySelector('.sticky-img-inner');
+                bx.fillStyle = (内层 && 内层.style.backgroundColor) || '#ffffff';
+                bx.fillRect(0, 0, body.width, body.height);
+                const 底 = 内层 ? /url\((["']?)([\s\S]*?)\1\)/.exec(内层.style.backgroundImage || '') : null;
+                const 底图 = 底 ? await 取图(底[2]) : null;
+                if (底图) {
+                    // 画布自己就把越界的地方裁了，等于 .sticky-img-inner 的 overflow: hidden
+                    const 尺寸 = (内层.style.backgroundSize || '').trim();
+                    const m = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(尺寸);
+                    if (尺寸 === 'cover') {
+                        // background-size: cover + background-position: center
+                        const k = Math.max(w / 底图.naturalWidth, h / 底图.naturalHeight);
+                        const dw = 底图.naturalWidth * k, dh = 底图.naturalHeight * k;
+                        bx.drawImage(底图, (w - dw) / 2 * S身, (h - dh) / 2 * S身, dw * S身, dh * S身);
+                    } else if (m) {
+                        // 拼图切片：整图按网格总尺寸铺开，再按行列偏移（paint2DNote 写的就是这两个数）
+                        const pm = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(内层.style.backgroundPosition || '');
+                        bx.drawImage(底图, (pm ? +pm[1] : 0) * S身, (pm ? +pm[2] : 0) * S身,
+                            +m[1] * S身, +m[2] * S身);
+                    } else {
+                        bx.drawImage(底图, 0, 0, body.width, body.height);
+                    }
+                }
+                const g = 便签表.get(live);
+                if (g) {
+                    // 跟 buildCornerGradient 逐条对应：同一个角、同一个 α（p.K * 0.015）、
+                    // 同样 0% → 60% 的衰减。它 push 的次序是 BR/BL/TR/TL，而 CSS 的多重
+                    // 背景是**后写的先画**，所以下面倒着画。
+                    const 角 = [['BR', 1, 1], ['BL', 0, 1], ['TR', 1, 0], ['TL', 0, 0]]
+                        .map(([k, x, y]) => ({ x, y, a: (g.p2[k] || 0) * 0.015 }))
+                        .filter((o) => o.a > 0);
+                    for (let j = 角.length - 1; j >= 0; j--) {
+                        const o = 角[j];
+                        const cxp = o.x * body.width, cyp = o.y * body.height;
+                        // circle 不写尺寸时按 farthest-corner 定半径，跟 CSS 一致
+                        let R = 0;
+                        [[0, 0], [body.width, 0], [0, body.height], [body.width, body.height]]
+                            .forEach(([qx, qy]) => { R = Math.max(R, Math.hypot(qx - cxp, qy - cyp)); });
+                        const rg = bx.createRadialGradient(cxp, cyp, 0, cxp, cyp, R);
+                        rg.addColorStop(0, `rgba(0,0,0,${o.a})`);
+                        rg.addColorStop(0.6, 'rgba(0,0,0,0)');
+                        bx.fillStyle = rg;
+                        bx.fillRect(0, 0, body.width, body.height);
+                    }
+                }
+                if (纸纹) {
+                    bx.globalCompositeOperation = 'multiply';
+                    bx.globalAlpha = 0.7;
+                    bx.drawImage(纸纹, 0, 0, body.width, body.height);
+                    bx.globalAlpha = 1;
+                    bx.globalCompositeOperation = 'source-over';
+                }
+                const 身 = document.createElement('img');
+                身.className = 'export-note-img';
+                身.setAttribute('style', 'position: absolute; pointer-events: none;'
+                    + ' left: 0px; top: 0px;'
+                    + ` width: ${w}px; height: ${h}px;`);
+                身.src = body.toDataURL('image/jpeg', 纸身质量);
+                // 排在影图之上 —— 影图中间那块挖空了，但真正盖住便签位置的是这一张
+                el.insertBefore(身, 影im ? 影im.nextSibling : el.firstChild);
             }
 
             // 字换图。空字、以及手写签名（本来就是 <img>）不用换
