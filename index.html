@@ -722,6 +722,27 @@
             padding-bottom: calc(72px + env(safe-area-inset-bottom));
         }
 
+        /* 安全区兜底。宿主的 webview（小红书）把 env(safe-area-inset-*) 一律报成 0，
+           上面那几条 env 就等于没写：顶栏页签顶在状态栏下被灵动岛压掉，底栏压在 home 条上。
+           app.js 开头探一次，量出来是 0 又确实是触摸屏就给 body 挂「无安全区」，
+           这里按刘海 44 / home 条 16 补回来。挂不上的时候这几条一条都不生效。 */
+        body.is-narrow.无安全区 { padding-top: calc(20px + 44px); padding-bottom: calc(72px + 16px); }
+        body.is-narrow.无安全区 #noteRail { padding-bottom: calc(6px + 16px); }
+
+        /* 屏宽补丁（见 app.js 的 屏宽补丁）生效时的几处修补。
+           宿主把页面按 980 排完再整页缩进屏幕时，body 被放大了同样的倍数，
+           但 vh / vw 不跟着放大 —— 写成它们的盒子会撑到屏幕外面去。
+           这几条按补丁量出来的 --屏高 / --屏宽 顶掉，没挂上这个类时一条都不生效。 */
+        body.屏宽补丁 .panel { max-height: calc(var(--屏高, 100vh) * .33); }
+        body.屏宽补丁 #toast { max-width: min(calc(var(--屏宽, 100vw) * .92), 520px); }
+        body.屏宽补丁 #matte .card {
+            width: calc(var(--屏宽, 100vw) * .92);
+            max-width: 420px;
+            max-height: calc(var(--屏高, 100vh) * .92);
+        }
+        body.屏宽补丁 #matte .mstage canvas { max-height: calc(var(--屏高, 100vh) * .44); }
+        body.屏宽补丁 .crop-modal { width: var(--屏宽, 100vw); height: var(--屏高, 100vh); }
+
         /* ===== 左半：舞台 ===== */
         /* 底色 / 底图由 JS 写在这两个变量上（见 applyStageBg）。
            「透明」档屏幕上仍是灰的 —— 导出那边才真透明，见 buildStageImage 里的说明。 */
@@ -1775,6 +1796,16 @@
         }
         .export-check:hover { background: rgba(255, 255, 255, .2); }
         .export-check input { accent-color: var(--deck-accent); width: 16px; height: 16px; margin: 0; }
+        /* 网页版入口：告诉人同一套东西浏览器里也有。压在压暗的底上，正文得是亮的；
+           网址单独给一支蓝，跟「网页版：」这几个字分开。
+           网页版本体上不显示 —— 人已经在网页版里了，再写一行「网页版：xxx」没意义。
+           打包成小红书小工具时由 打包/构建小工具.py 放出来（见那边的 小工具专属）。 */
+        .export-web {
+            display: none;
+            margin: 0; font-size: 12px; line-height: 1.4;
+            color: rgba(255, 255, 255, .78);
+        }
+        .export-web span { color: #6cb2ff; }
         /* ---- 选框那套皮：裁剪框（背景图 / 切片照片 / 单张便签图）和素材裁剪共用 ----
            两边长得一样、下手的动作也一样（图整张摊平，拖框选一块），所以皮并成一条。
            差别全在 JS：素材那个比例随便，裁剪框锁着长宽比（每个入口要的比例不同，
@@ -2490,6 +2521,7 @@
             <input type="checkbox" id="bgTransparent">
             <span>透明背景</span>
         </label>
+        <p class="export-web">网页版：<span>mypostits.pages.dev</span></p>
         <div class="row-flex">
             <button id="btnConfirmExport" class="crop-ok">导出</button>
             <button id="btnCancelExport" class="crop-ghost">取消</button>
@@ -4015,7 +4047,63 @@
         const BODY_PAD = 40;        // body 左右各 20
         const WORKSPACE_MAX = 1500; // 与 .workspace 的 max-width 保持一致
 
+        // =====================================================================
+        // 按真实屏幕宽来排
+        // =====================================================================
+        // 有些宿主（安卓上有这类 webview）不认页面里的 viewport 声明，先按 980 排一遍、
+        // 再把整页缩进屏幕 —— 页面里一个 CSS 像素只剩三分之一，字小画布小，而壳又不给放大。
+        //
+        // 量出真实屏幕宽，把 body 放大同样的倍数：排版宽度就退回屏幕宽，两头正好抵掉。
+        // 只在「报出来的宽度明显大于真实屏幕宽」且确实是触摸设备时才动，
+        // 正常浏览器（报什么就是什么）一条都不生效。
+        //
+        // vh / vw 不跟着 zoom 缩，所以补高的那两处（body 高度、面板上限）另给了变量。
+        let 屏宽倍数 = 1;
+
+        function 屏宽补丁() {
+            const 根 = document.documentElement;
+            const 现宽 = 根.clientWidth;
+            const 视 = window.visualViewport;
+            // 被缩的时候，可视宽 × 缩放比就是屏幕真实宽（CSS 像素）
+            const 被缩 = !!(视 && 视.scale > 0 && 视.scale < 0.9);
+            const 真宽 = 被缩 ? Math.round(视.width * 视.scale)
+                              : Math.round((window.screen && screen.width) || 0);
+            const 粗指针 = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+            const 该补 = 真宽 > 0 && 现宽 > 真宽 * 1.2 && (被缩 || 粗指针);
+
+            if (!该补) {
+                if (屏宽倍数 !== 1) {
+                    屏宽倍数 = 1;
+                    根.style.removeProperty('--屏高');
+                    根.style.removeProperty('--屏宽');
+                    document.body.classList.remove('屏宽补丁');
+                    document.body.style.zoom = '';
+                    document.body.style.height = '';
+                    document.body.style.minHeight = '';
+                }
+                return;
+            }
+
+            const 新值 = Math.round((现宽 / 真宽) * 1000) / 1000;
+            if (新值 === 屏宽倍数) return;
+            屏宽倍数 = 新值;
+
+            const 补高 = Math.round(根.clientHeight / 新值);
+            根.style.setProperty('--屏高', 补高 + 'px');
+            根.style.setProperty('--屏宽', Math.round(现宽 / 新值) + 'px');
+            document.body.classList.add('屏宽补丁');
+            document.body.style.zoom = String(新值);
+            document.body.style.height = 补高 + 'px';
+            document.body.style.minHeight = 补高 + 'px';
+        }
+
+        // 视口一变就得重来：layouts 只在这一处触发，缺了这条监听，拖窗口 / 改模拟尺寸时
+        // 版面会停在进入时那一次的结果上（手机上「转屏了还是竖排那么大」也是这个原因）。
+        addEventListener('resize', () => { 屏宽补丁(); layout(); });
+        if (window.visualViewport) visualViewport.addEventListener('resize', () => { 屏宽补丁(); layout(); });
+
         function layout() {
+            屏宽补丁();
             const panel = document.querySelector('.panel');
 
             // 量之前先把「进来的时候窄不窄」记下来：下面第一句就会把 is-narrow 摘掉，
@@ -4036,9 +4124,11 @@
             const panelW = panel.offsetWidth;
             panel.style.flexShrink = prevShrink;
 
-            const avail = document.documentElement.clientWidth;
+            // 屏宽补丁生效时根元素仍报被宿主放大的宽度，得按缩放比折回去
+            const avail = Math.round(document.documentElement.clientWidth / 屏宽倍数);
             const need = stageContainer.offsetWidth + WORKSPACE_GAP + panelW + BODY_PAD;
-            const narrow = need > avail;
+            // 小红书包里强制走手机版：那边壳报的宽度不可信，按宽度判会误判成电脑版
+            const narrow = window.__强制手机版 === true || need > avail;
             document.body.classList.toggle('is-narrow', narrow);
 
             // 底栏整条只在窄屏存在（CSS 里 #noteRail{display:none}），宽窄一变就得重刷 ——
